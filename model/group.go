@@ -41,6 +41,11 @@ type Group struct {
 	DeleteAt     int64       `json:"delete_at"`
 	HasSyncables bool        `db:"-" json:"has_syncables"`
 	MemberCount  *int        `db:"-" json:"member_count,omitempty"`
+
+	// SchemeAdmin is only valid if the Group has been retrieved from the perspective of an associated Syncable
+	// because actually it's an attribute of the GroupSyncable join model. For convenience it can be set on the
+	// Group when doing a "get groups by channel" or "get groups by team" retrieval.
+	SchemeAdmin *bool `db:"-" json:"scheme_admin"`
 }
 
 type GroupPatch struct {
