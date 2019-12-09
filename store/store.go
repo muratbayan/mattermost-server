@@ -9,6 +9,13 @@ import (
 	"github.com/mattermost/mattermost-server/v5/model"
 )
 
+type Equality int
+
+const (
+	Equals Equality = iota
+	NotEquals
+)
+
 type StoreResult struct {
 	Data interface{}
 	Err  *model.AppError
@@ -618,6 +625,8 @@ type GroupStore interface {
 	GroupSyncablesWithAdminRole(userID, teamID string, syncableType model.GroupSyncableType) ([]string, *model.AppError)
 
 	PermittedSyncableAdmins(syncableID string, syncableType model.GroupSyncableType) ([]string, *model.AppError)
+
+	UpdateMembersRole(syncableID string, syncableType model.GroupSyncableType, userIDs []string, idEquality Equality, newSchemeAdminValue bool) *model.AppError
 }
 
 type LinkMetadataStore interface {
