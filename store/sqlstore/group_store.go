@@ -1217,7 +1217,6 @@ func (s *SqlGroupStore) UpdateMembersRole(syncableID string, syncableType model.
 	query := s.getQueryBuilder().
 		Update(fmt.Sprintf("%sMembers", syncableType)).
 		Set("SchemeAdmin", newSchemeAdminValue).
-		Set("UpdateAt", model.GetMillis()).
 		Where(sq.Eq{fmt.Sprintf("%sId", syncableType): syncableID})
 
 	if idEquality == store.Equals {
