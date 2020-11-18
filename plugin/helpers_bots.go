@@ -66,6 +66,7 @@ type ShouldProcessMessageOption func(*shouldProcessMessageOptions)
 type shouldProcessMessageOptions struct {
 	AllowSystemMessages bool
 	AllowBots           bool
+	AllowWebhook        bool
 	FilterChannelIDs    []string
 	FilterUserIDs       []string
 	OnlyBotDMs          bool
@@ -86,6 +87,15 @@ func AllowSystemMessages() ShouldProcessMessageOption {
 func AllowBots() ShouldProcessMessageOption {
 	return func(options *shouldProcessMessageOptions) {
 		options.AllowBots = true
+	}
+}
+
+// AllowWebhook configures a call to ShouldProcessMessage to return true for posts from webhook.
+//
+// As it is typically desirable only to consume messages from human users of the system, ShouldProcessMessage ignores webhook messages by default.
+func AllowWebhook() ShouldProcessMessageOption {
+	return func(options *shouldProcessMessageOptions) {
+		options.AllowWebhook = true
 	}
 }
 
@@ -135,6 +145,10 @@ func (p *HelpersImpl) ShouldProcessMessage(post *model.Post, options ...ShouldPr
 	}
 
 	if post.IsSystemMessage() && !messageProcessOptions.AllowSystemMessages {
+		return false, nil
+	}
+
+	if !messageProcessOptions.AllowWebhook && post.GetProp("from_webhook") == "true" {
 		return false, nil
 	}
 
@@ -217,9 +231,21 @@ func (p *HelpersImpl) ensureBot(bot *model.Bot) (retBotID string, retErr error) 
 		return "", errors.Wrap(kvGetErr, "failed to get bot")
 	}
 
-	// If the bot has already been created, there is nothing to do.
+	// If the bot has already been created, use it
 	if botIDBytes != nil {
 		botID := string(botIDBytes)
+
+		// ensure existing bot is synced with what is being created
+		botPatch := &model.BotPatch{
+			Username:    &bot.Username,
+			DisplayName: &bot.DisplayName,
+			Description: &bot.Description,
+		}
+
+		if _, err := p.API.PatchBot(botID, botPatch); err != nil {
+			return "", errors.Wrap(err, "failed to patch bot")
+		}
+
 		return botID, nil
 	}
 

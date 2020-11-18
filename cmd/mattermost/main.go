@@ -8,6 +8,9 @@ import (
 
 	"github.com/mattermost/mattermost-server/v5/cmd/mattermost/commands"
 
+	// Import and register app layer slash commands
+	_ "github.com/mattermost/mattermost-server/v5/app/slashcommands"
+
 	// Plugins
 	_ "github.com/mattermost/mattermost-server/v5/model/gitlab"
 
@@ -18,6 +21,7 @@ import (
 	_ "github.com/gorilla/handlers"
 	_ "github.com/hako/durafmt"
 	_ "github.com/hashicorp/memberlist"
+	_ "github.com/mattermost/gosaml2"
 	_ "github.com/mattermost/ldap"
 	_ "github.com/mattermost/rsc/qr"
 	_ "github.com/prometheus/client_golang/prometheus"
