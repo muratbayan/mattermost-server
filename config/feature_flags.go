@@ -6,12 +6,15 @@ package config
 import (
 	"math"
 	"reflect"
+	"strconv"
+	"strings"
 
-	"github.com/mattermost/mattermost-server/v5/mlog"
-	"github.com/mattermost/mattermost-server/v5/model"
 	"github.com/pkg/errors"
 	"github.com/splitio/go-client/v6/splitio/client"
 	"github.com/splitio/go-client/v6/splitio/conf"
+
+	"github.com/mattermost/mattermost-server/v5/model"
+	"github.com/mattermost/mattermost-server/v5/shared/mlog"
 )
 
 type FeatureFlagSyncParams struct {
@@ -19,6 +22,7 @@ type FeatureFlagSyncParams struct {
 	SplitKey            string
 	SyncIntervalSeconds int
 	Log                 *mlog.Logger
+	Attributes          map[string]interface{}
 }
 
 type FeatureFlagSynchronizer struct {
@@ -51,17 +55,17 @@ func NewFeatureFlagSynchronizer(params FeatureFlagSyncParams) (*FeatureFlagSynch
 	}, nil
 }
 
-// ensureReady blocks until the syncronizer is ready to update feature flag values
+// EnsureReady blocks until the syncronizer is ready to update feature flag values
 func (f *FeatureFlagSynchronizer) EnsureReady() error {
 	if err := f.client.BlockUntilReady(10); err != nil {
-		return errors.Wrap(err, "split.io client could not initalize")
+		return errors.Wrap(err, "split.io client could not initialize")
 	}
 
 	return nil
 }
 
 func (f *FeatureFlagSynchronizer) UpdateFeatureFlagValues(base model.FeatureFlags) model.FeatureFlags {
-	featuresMap := f.client.Treatments(f.ServerID, featureNames, nil)
+	featuresMap := f.client.Treatments(f.ServerID, featureNames, f.Attributes)
 	ffm := featureFlagsFromMap(featuresMap, base)
 	return ffm
 }
@@ -73,7 +77,8 @@ func (f *FeatureFlagSynchronizer) Close() {
 // featureFlagsFromMap sets the feature flags from a map[string]string.
 // It starts with baseFeatureFlags and only sets values that are
 // given by the upstream management system.
-// Makes the assumption that all feature flags are strings for now.
+// Makes the assumption that all feature flags are strings or booleans.
+// Strings are converted to booleans by considering case insensitive "on" or any value considered by strconv.ParseBool as true and any other value as false.
 func featureFlagsFromMap(featuresMap map[string]string, baseFeatureFlags model.FeatureFlags) model.FeatureFlags {
 	refStruct := reflect.ValueOf(&baseFeatureFlags).Elem()
 	for fieldName, fieldValue := range featuresMap {
@@ -83,7 +88,14 @@ func featureFlagsFromMap(featuresMap map[string]string, baseFeatureFlags model.F
 			continue
 		}
 
-		refField.Set(reflect.ValueOf(fieldValue))
+		switch refField.Type().Kind() {
+		case reflect.Bool:
+			parsedBoolValue, _ := strconv.ParseBool(fieldValue)
+			refField.Set(reflect.ValueOf(strings.ToLower(fieldValue) == "on" || parsedBoolValue))
+		default:
+			refField.Set(reflect.ValueOf(fieldValue))
+		}
+
 	}
 	return baseFeatureFlags
 }

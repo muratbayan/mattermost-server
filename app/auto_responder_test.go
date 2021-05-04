@@ -6,9 +6,10 @@ package app
 import (
 	"testing"
 
-	"github.com/mattermost/mattermost-server/v5/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mattermost/mattermost-server/v5/model"
 )
 
 func TestSetAutoResponderStatus(t *testing.T) {
@@ -194,6 +195,43 @@ func TestSendAutoResponseIfNecessary(t *testing.T) {
 		sent, err := th.App.SendAutoResponseIfNecessary(channel, botUser, savedPost)
 
 		assert.Nil(t, err)
+		assert.False(t, sent)
+	})
+
+	t.Run("should send auto response in dm channel if not already sent today", func(t *testing.T) {
+		th := Setup(t).InitBasic()
+		defer th.TearDown()
+
+		receiver := th.CreateUser()
+
+		patch := &model.UserPatch{
+			NotifyProps: map[string]string{
+				"auto_responder_active":  "true",
+				"auto_responder_message": "Hello, I'm unavailable today.",
+			},
+		}
+		receiver, err := th.App.PatchUser(receiver.Id, patch, true)
+		require.Nil(t, err)
+
+		channel := th.CreateDmChannel(receiver)
+
+		savedPost, err := th.App.CreatePost(&model.Post{
+			ChannelId: channel.Id,
+			Message:   NewTestId(),
+			UserId:    th.BasicUser.Id},
+			th.BasicChannel,
+			false, true)
+
+		assert.Nil(t, err)
+
+		sent, err := th.App.SendAutoResponseIfNecessary(channel, th.BasicUser, savedPost)
+
+		require.Nil(t, err)
+		assert.True(t, sent)
+
+		sent, err = th.App.SendAutoResponseIfNecessary(channel, th.BasicUser, savedPost)
+
+		require.Nil(t, err)
 		assert.False(t, sent)
 	})
 }

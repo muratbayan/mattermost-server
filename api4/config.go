@@ -11,8 +11,8 @@ import (
 
 	"github.com/mattermost/mattermost-server/v5/audit"
 	"github.com/mattermost/mattermost-server/v5/config"
-	"github.com/mattermost/mattermost-server/v5/mlog"
 	"github.com/mattermost/mattermost-server/v5/model"
+	"github.com/mattermost/mattermost-server/v5/shared/mlog"
 	"github.com/mattermost/mattermost-server/v5/utils"
 )
 
@@ -22,8 +22,10 @@ var permissionMap map[string]*model.Permission
 
 type filterType string
 
-const filterTypeWrite filterType = "write"
-const filterTypeRead filterType = "read"
+const (
+	FilterTypeWrite filterType = "write"
+	FilterTypeRead  filterType = "read"
+)
 
 func (api *API) InitConfig() {
 	api.BaseRoutes.ApiRoot.Handle("/config", api.ApiSessionRequired(getConfig)).Methods("GET")
@@ -36,8 +38,8 @@ func (api *API) InitConfig() {
 }
 
 func init() {
-	writeFilter = makeFilterConfigByPermission(filterTypeWrite)
-	readFilter = makeFilterConfigByPermission(filterTypeRead)
+	writeFilter = makeFilterConfigByPermission(FilterTypeWrite)
+	readFilter = makeFilterConfigByPermission(FilterTypeRead)
 	permissionMap = map[string]*model.Permission{}
 	for _, p := range model.AllPermissions {
 		permissionMap[p.Id] = p
@@ -65,7 +67,7 @@ func getConfig(c *Context, w http.ResponseWriter, r *http.Request) {
 	auditRec.Success()
 
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	if c.App.Srv().License() != nil && *c.App.Srv().License().Features.Cloud && *cfg.ExperimentalSettings.RestrictSystemAdmin {
+	if c.App.Srv().License() != nil && *c.App.Srv().License().Features.Cloud {
 		w.Write([]byte(cfg.ToJsonFiltered(model.ConfigAccessTagType, model.ConfigAccessTagCloudRestrictable)))
 	} else {
 		w.Write([]byte(cfg.ToJson()))
@@ -76,8 +78,8 @@ func configReload(c *Context, w http.ResponseWriter, r *http.Request) {
 	auditRec := c.MakeAuditRecord("configReload", audit.Fail)
 	defer c.LogAuditRec(auditRec)
 
-	if !c.App.SessionHasPermissionToAny(*c.App.Session(), model.SysconsoleReadPermissions) {
-		c.SetPermissionError(model.SysconsoleReadPermissions...)
+	if !c.App.SessionHasPermissionTo(*c.App.Session(), model.PERMISSION_RELOAD_CONFIG) {
+		c.SetPermissionError(model.PERMISSION_RELOAD_CONFIG)
 		return
 	}
 
@@ -160,7 +162,7 @@ func updateConfig(c *Context, w http.ResponseWriter, r *http.Request) {
 	c.LogAudit("updateConfig")
 
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	if c.App.Srv().License() != nil && *c.App.Srv().License().Features.Cloud && *cfg.ExperimentalSettings.RestrictSystemAdmin {
+	if c.App.Srv().License() != nil && *c.App.Srv().License().Features.Cloud {
 		w.Write([]byte(cfg.ToJsonFiltered(model.ConfigAccessTagType, model.ConfigAccessTagCloudRestrictable)))
 	} else {
 		w.Write([]byte(cfg.ToJson()))
@@ -181,7 +183,7 @@ func getClientConfig(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	var config map[string]string
-	if len(c.App.Session().UserId) == 0 {
+	if c.App.Session().UserId == "" {
 		config = c.App.LimitedClientConfigWithComputed()
 	} else {
 		config = c.App.ClientConfigWithComputed()
@@ -191,12 +193,11 @@ func getClientConfig(c *Context, w http.ResponseWriter, r *http.Request) {
 }
 
 func getEnvironmentConfig(c *Context, w http.ResponseWriter, r *http.Request) {
-	if !c.App.SessionHasPermissionTo(*c.App.Session(), model.PERMISSION_SYSCONSOLE_READ_ENVIRONMENT) {
-		c.SetPermissionError(model.PERMISSION_SYSCONSOLE_READ_ENVIRONMENT)
-		return
-	}
-
-	envConfig := c.App.GetEnvironmentConfig()
+	// Only return the environment variables for the subsections which the client is
+	// allowed to see
+	envConfig := c.App.GetEnvironmentConfig(func(structField reflect.StructField) bool {
+		return readFilter(c, structField)
+	})
 
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Write([]byte(model.StringInterfaceToJson(envConfig)))
@@ -228,7 +229,10 @@ func patchConfig(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Do not allow plugin uploads to be toggled through the API
-	cfg.PluginSettings.EnableUploads = appCfg.PluginSettings.EnableUploads
+	if cfg.PluginSettings.EnableUploads != nil && *cfg.PluginSettings.EnableUploads != *appCfg.PluginSettings.EnableUploads {
+		c.Err = model.NewAppError("patchConfig", "api.config.update_config.not_allowed_security.app_error", map[string]interface{}{"Name": "PluginSettings.EnableUploads"}, "", http.StatusForbidden)
+		return
+	}
 
 	if cfg.MessageExportSettings.EnableExport != nil {
 		c.App.HandleMessageExportConfig(cfg, appCfg)
@@ -267,7 +271,7 @@ func patchConfig(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	if c.App.Srv().License() != nil && *c.App.Srv().License().Features.Cloud && *cfg.ExperimentalSettings.RestrictSystemAdmin {
+	if c.App.Srv().License() != nil && *c.App.Srv().License().Features.Cloud {
 		w.Write([]byte(cfg.ToJsonFiltered(model.ConfigAccessTagType, model.ConfigAccessTagCloudRestrictable)))
 	} else {
 		w.Write([]byte(cfg.ToJson()))
@@ -298,7 +302,7 @@ func makeFilterConfigByPermission(accessType filterType) func(c *Context, struct
 			}
 			// ConfigAccessTagWriteRestrictable trumps all other permissions
 			if tagValue == model.ConfigAccessTagWriteRestrictable || tagValue == model.ConfigAccessTagCloudRestrictable {
-				if *c.App.Config().ExperimentalSettings.RestrictSystemAdmin && accessType == filterTypeWrite {
+				if *c.App.Config().ExperimentalSettings.RestrictSystemAdmin && accessType == FilterTypeWrite {
 					return false
 				}
 				continue
@@ -317,6 +321,11 @@ func makeFilterConfigByPermission(accessType filterType) func(c *Context, struct
 			if tagValue == model.ConfigAccessTagCloudRestrictable {
 				continue
 			}
+			if tagValue == model.ConfigAccessTagAnySysConsoleRead && accessType == FilterTypeRead &&
+				c.App.SessionHasPermissionToAny(*c.App.Session(), model.SysconsoleReadPermissions) {
+				return true
+			}
+
 			permissionID := fmt.Sprintf("sysconsole_%s_%s", accessType, tagValue)
 			if permission, ok := permissionMap[permissionID]; ok {
 				if c.App.SessionHasPermissionTo(*c.App.Session(), permission) {

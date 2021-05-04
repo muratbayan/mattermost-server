@@ -4,9 +4,21 @@
 package app
 
 import (
-	"github.com/mattermost/mattermost-server/v5/mlog"
+	"net/http"
+	"time"
+
 	"github.com/mattermost/mattermost-server/v5/model"
 )
+
+// check if there is any auto_response type post in channel by the user in a calender day
+func (a *App) checkIfRespondedToday(createdAt int64, channelId, userId string) (bool, error) {
+	y, m, d := time.Unix(createdAt, 0).Date()
+	since := model.GetMillisForTime(time.Date(y, m, d, 0, 0, 0, 0, time.UTC))
+	return a.Srv().Store.Post().HasAutoResponsePostByUserSince(
+		model.GetPostsSinceOptions{ChannelId: channelId, Time: since},
+		userId,
+	)
+}
 
 func (a *App) SendAutoResponseIfNecessary(channel *model.Channel, sender *model.User, post *model.Post) (bool, *model.AppError) {
 	if channel.Type != model.CHANNEL_DIRECT {
@@ -23,9 +35,17 @@ func (a *App) SendAutoResponseIfNecessary(channel *model.Channel, sender *model.
 		receiverId = sender.Id
 	}
 
-	receiver, err := a.GetUser(receiverId)
+	receiver, aErr := a.GetUser(receiverId)
+	if aErr != nil {
+		return false, aErr
+	}
+
+	autoResponded, err := a.checkIfRespondedToday(post.CreateAt, post.ChannelId, receiverId)
 	if err != nil {
-		return false, err
+		return false, model.NewAppError("SendAutoResponseIfNecessary", "app.user.send_auto_response.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+	if autoResponded {
+		return false, nil
 	}
 
 	return a.SendAutoResponse(channel, receiver, post)
@@ -57,7 +77,6 @@ func (a *App) SendAutoResponse(channel *model.Channel, receiver *model.User, pos
 	}
 
 	if _, err := a.CreatePost(autoResponderPost, channel, false, false); err != nil {
-		mlog.Error(err.Error())
 		return false, err
 	}
 
@@ -78,8 +97,8 @@ func (a *App) SetAutoResponderStatus(user *model.User, oldNotifyProps model.Stri
 	}
 }
 
-func (a *App) DisableAutoResponder(userId string, asAdmin bool) *model.AppError {
-	user, err := a.GetUser(userId)
+func (a *App) DisableAutoResponder(userID string, asAdmin bool) *model.AppError {
+	user, err := a.GetUser(userID)
 	if err != nil {
 		return err
 	}
@@ -91,7 +110,7 @@ func (a *App) DisableAutoResponder(userId string, asAdmin bool) *model.AppError 
 		patch.NotifyProps = user.NotifyProps
 		patch.NotifyProps[model.AUTO_RESPONDER_ACTIVE_NOTIFY_PROP] = "false"
 
-		_, err := a.PatchUser(userId, patch, asAdmin)
+		_, err := a.PatchUser(userID, patch, asAdmin)
 		if err != nil {
 			return err
 		}

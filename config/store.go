@@ -6,12 +6,19 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
+	"reflect"
 	"sync"
+
+	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost-server/v5/model"
 	"github.com/mattermost/mattermost-server/v5/utils/jsonutils"
-	"github.com/pkg/errors"
+)
+
+var (
+	// ErrReadOnlyStore is returned when an attempt to modify a read-only
+	// configuration store is made.
+	ErrReadOnlyStore = errors.New("configuration store is read-only")
 )
 
 // Listener is a callback function invoked when the configuration changes.
@@ -48,19 +55,26 @@ type BackingStore interface {
 }
 
 // NewStore creates a database or file store given a data source name by which to connect.
-func NewStore(dsn string, watch bool, customDefaults *model.Config) (*Store, error) {
+func NewStore(dsn string, watch, readOnly bool, customDefaults *model.Config) (*Store, error) {
 	backingStore, err := getBackingStore(dsn, watch)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewStoreFromBacking(backingStore, customDefaults)
+	store, err := NewStoreFromBacking(backingStore, customDefaults, readOnly)
+	if err != nil {
+		backingStore.Close()
+		return nil, errors.Wrap(err, "failed to create store")
+	}
+
+	return store, nil
 }
 
-func NewStoreFromBacking(backingStore BackingStore, customDefaults *model.Config) (*Store, error) {
+func NewStoreFromBacking(backingStore BackingStore, customDefaults *model.Config, readOnly bool) (*Store, error) {
 	store := &Store{
 		backingStore:         backingStore,
 		configCustomDefaults: customDefaults,
+		readOnly:             readOnly,
 	}
 
 	if err := store.Load(); err != nil {
@@ -77,7 +91,7 @@ func NewStoreFromBacking(backingStore BackingStore, customDefaults *model.Config
 }
 
 func getBackingStore(dsn string, watch bool) (BackingStore, error) {
-	if strings.HasPrefix(dsn, "mysql://") || strings.HasPrefix(dsn, "postgres://") {
+	if IsDatabaseDSN(dsn) {
 		return NewDatabaseStore(dsn)
 	}
 
@@ -90,7 +104,7 @@ func NewTestMemoryStore() *Store {
 		panic("failed to initialize memory store: " + err.Error())
 	}
 
-	configStore, err := NewStoreFromBacking(memoryStore, nil)
+	configStore, err := NewStoreFromBacking(memoryStore, nil, false)
 	if err != nil {
 		panic("failed to initialize config store: " + err.Error())
 	}
@@ -108,6 +122,7 @@ type Store struct {
 	configCustomDefaults *model.Config
 
 	persistFeatureFlags bool
+	readOnly            bool
 }
 
 // Get fetches the current, cached configuration.
@@ -126,7 +141,13 @@ func (s *Store) GetNoEnv() *model.Config {
 
 // GetEnvironmentOverrides fetches the configuration fields overridden by environment variables.
 func (s *Store) GetEnvironmentOverrides() map[string]interface{} {
-	return generateEnvironmentMap(GetEnvironment())
+	return generateEnvironmentMap(GetEnvironment(), nil)
+}
+
+// GetEnvironmentOverridesWithFilter fetches the configuration fields overridden by environment variables.
+// If filter is not nil and returns false for a struct field, that field will be omitted.
+func (s *Store) GetEnvironmentOverridesWithFilter(filter func(reflect.StructField) bool) map[string]interface{} {
+	return generateEnvironmentMap(GetEnvironment(), filter)
 }
 
 // RemoveEnvironmentOverrides returns a new config without the environment
@@ -150,6 +171,10 @@ func (s *Store) Set(newCfg *model.Config) (*model.Config, error) {
 	var unlockOnce sync.Once
 	defer unlockOnce.Do(s.configLock.Unlock)
 
+	if s.readOnly {
+		return nil, ErrReadOnlyStore
+	}
+
 	oldCfg := s.config.Clone()
 
 	// Really just for some tests we need to set defaults here
@@ -167,7 +192,7 @@ func (s *Store) Set(newCfg *model.Config) (*model.Config, error) {
 
 	// Don't persist feature flags unless we are on MM cloud
 	// MM cloud uses config in the DB as a cache of the feature flag
-	// settings in case the managment system is down when a pod starts.
+	// settings in case the management system is down when a pod starts.
 	if !s.persistFeatureFlags {
 		newCfg.FeatureFlags = nil
 	}
@@ -192,9 +217,11 @@ func (s *Store) loadLockedWithOld(oldCfg *model.Config, unlockOnce *sync.Once) e
 	loadedConfig := &model.Config{}
 	if len(configBytes) != 0 {
 		if err = json.Unmarshal(configBytes, &loadedConfig); err != nil {
-			return jsonutils.HumanizeJsonError(err, configBytes)
+			return jsonutils.HumanizeJSONError(err, configBytes)
 		}
 	}
+
+	loadedFeatureFlags := loadedConfig.FeatureFlags
 
 	// If we have custom defaults set, the initial config is merged on
 	// top of them and we delete them not to be used again in the
@@ -230,9 +257,28 @@ func (s *Store) loadLockedWithOld(oldCfg *model.Config, unlockOnce *sync.Once) e
 	if err != nil {
 		return errors.Wrap(err, "failed to marshal loaded config")
 	}
-	if len(configBytes) == 0 || !bytes.Equal(oldCfgBytes, newCfgBytes) {
-		if err := s.backingStore.Set(s.configNoEnv); err != nil {
-			if !errors.Is(err, ErrReadOnlyConfiguration) {
+
+	var shouldStore bool
+	hasChanged := len(configBytes) == 0 || !bytes.Equal(oldCfgBytes, newCfgBytes)
+	if hasChanged {
+		featureFlags := s.configNoEnv.FeatureFlags
+		// Don't persist feature flags unless we are on MM cloud
+		// MM cloud uses config in the DB as a cache of the feature flag
+		// settings in case the management system is down when a pod starts.
+		if !s.persistFeatureFlags {
+			s.configNoEnv.FeatureFlags = loadedFeatureFlags
+		}
+		toStoreBytes, err := json.Marshal(s.configNoEnv)
+		if err != nil {
+			return errors.Wrap(err, "failed to marshal old config")
+		}
+		shouldStore = !bytes.Equal(toStoreBytes, configBytes)
+		// We write back to the backing store only if
+		// the config has changed and the store is not read-only.
+		if !s.readOnly && shouldStore {
+			err := s.backingStore.Set(s.configNoEnv)
+			s.configNoEnv.FeatureFlags = featureFlags
+			if err != nil && !errors.Is(err, ErrReadOnlyConfiguration) {
 				return errors.Wrap(err, "failed to persist")
 			}
 		}
@@ -242,7 +288,9 @@ func (s *Store) loadLockedWithOld(oldCfg *model.Config, unlockOnce *sync.Once) e
 
 	unlockOnce.Do(s.configLock.Unlock)
 
-	s.invokeConfigListeners(oldCfg, loadedConfig)
+	if hasChanged {
+		s.invokeConfigListeners(oldCfg, loadedConfig)
+	}
 
 	return nil
 }
@@ -270,6 +318,9 @@ func (s *Store) GetFile(name string) ([]byte, error) {
 func (s *Store) SetFile(name string, data []byte) error {
 	s.configLock.Lock()
 	defer s.configLock.Unlock()
+	if s.readOnly {
+		return ErrReadOnlyStore
+	}
 	return s.backingStore.SetFile(name, data)
 }
 
@@ -284,6 +335,9 @@ func (s *Store) HasFile(name string) (bool, error) {
 func (s *Store) RemoveFile(name string) error {
 	s.configLock.Lock()
 	defer s.configLock.Unlock()
+	if s.readOnly {
+		return ErrReadOnlyStore
+	}
 	return s.backingStore.RemoveFile(name)
 }
 
@@ -297,4 +351,11 @@ func (s *Store) Close() error {
 	s.configLock.Lock()
 	defer s.configLock.Unlock()
 	return s.backingStore.Close()
+}
+
+// IsReadOnly returns whether or not the store is read-only.
+func (s *Store) IsReadOnly() bool {
+	s.configLock.RLock()
+	defer s.configLock.RUnlock()
+	return s.readOnly
 }

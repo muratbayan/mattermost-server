@@ -4,14 +4,16 @@
 package api4
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/mattermost/mattermost-server/v5/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mattermost/mattermost-server/v5/model"
 )
 
 func TestGetGroup(t *testing.T) {
@@ -595,7 +597,7 @@ func TestPatchGroupChannel(t *testing.T) {
 	assert.NotNil(t, groupSyncable)
 	assert.True(t, groupSyncable.AutoAdd)
 
-	role, err := th.App.GetRoleByName("channel_user")
+	role, err := th.App.GetRoleByName(context.Background(), "channel_user")
 	require.Nil(t, err)
 	originalPermissions := role.Permissions
 	_, err = th.App.PatchRole(role, &model.RolePatch{Permissions: &[]string{}})

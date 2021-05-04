@@ -4,33 +4,33 @@
 package slashcommands
 
 import (
+	"context"
 	"strings"
 
-	goi18n "github.com/mattermost/go-i18n/i18n"
-
 	"github.com/mattermost/mattermost-server/v5/app"
-	"github.com/mattermost/mattermost-server/v5/mlog"
 	"github.com/mattermost/mattermost-server/v5/model"
+	"github.com/mattermost/mattermost-server/v5/shared/i18n"
+	"github.com/mattermost/mattermost-server/v5/shared/mlog"
 )
 
 type InviteProvider struct {
 }
 
 const (
-	CMD_INVITE = "invite"
+	CmdInvite = "invite"
 )
 
 func init() {
 	app.RegisterCommandProvider(&InviteProvider{})
 }
 
-func (me *InviteProvider) GetTrigger() string {
-	return CMD_INVITE
+func (*InviteProvider) GetTrigger() string {
+	return CmdInvite
 }
 
-func (me *InviteProvider) GetCommand(a *app.App, T goi18n.TranslateFunc) *model.Command {
+func (*InviteProvider) GetCommand(a *app.App, T i18n.TranslateFunc) *model.Command {
 	return &model.Command{
-		Trigger:          CMD_INVITE,
+		Trigger:          CmdInvite,
 		AutoComplete:     true,
 		AutoCompleteDesc: T("api.command_invite.desc"),
 		AutoCompleteHint: T("api.command_invite.hint"),
@@ -38,7 +38,7 @@ func (me *InviteProvider) GetCommand(a *app.App, T goi18n.TranslateFunc) *model.
 	}
 }
 
-func (me *InviteProvider) DoCommand(a *app.App, args *model.CommandArgs, message string) *model.CommandResponse {
+func (*InviteProvider) DoCommand(a *app.App, args *model.CommandArgs, message string) *model.CommandResponse {
 	if message == "" {
 		return &model.CommandResponse{
 			Text:         args.T("api.command_invite.missing_message.app_error"),
@@ -104,7 +104,7 @@ func (me *InviteProvider) DoCommand(a *app.App, args *model.CommandArgs, message
 		}
 	case model.CHANNEL_PRIVATE:
 		if !a.HasPermissionToChannel(args.UserId, channelToJoin.Id, model.PERMISSION_MANAGE_PRIVATE_CHANNEL_MEMBERS) {
-			if _, err = a.GetChannelMember(channelToJoin.Id, args.UserId); err == nil {
+			if _, err = a.GetChannelMember(context.Background(), channelToJoin.Id, args.UserId); err == nil {
 				// User doing the inviting is a member of the channel.
 				return &model.CommandResponse{
 					Text: args.T("api.command_invite.permission.app_error", map[string]interface{}{
@@ -113,14 +113,13 @@ func (me *InviteProvider) DoCommand(a *app.App, args *model.CommandArgs, message
 					}),
 					ResponseType: model.COMMAND_RESPONSE_TYPE_EPHEMERAL,
 				}
-			} else {
-				// User doing the inviting is *not* a member of the channel.
-				return &model.CommandResponse{
-					Text: args.T("api.command_invite.private_channel.app_error", map[string]interface{}{
-						"Channel": channelToJoin.Name,
-					}),
-					ResponseType: model.COMMAND_RESPONSE_TYPE_EPHEMERAL,
-				}
+			}
+			// User doing the inviting is *not* a member of the channel.
+			return &model.CommandResponse{
+				Text: args.T("api.command_invite.private_channel.app_error", map[string]interface{}{
+					"Channel": channelToJoin.Name,
+				}),
+				ResponseType: model.COMMAND_RESPONSE_TYPE_EPHEMERAL,
 			}
 		}
 	default:
@@ -131,7 +130,7 @@ func (me *InviteProvider) DoCommand(a *app.App, args *model.CommandArgs, message
 	}
 
 	// Check if user is already in the channel
-	_, err = a.GetChannelMember(channelToJoin.Id, userProfile.Id)
+	_, err = a.GetChannelMember(context.Background(), channelToJoin.Id, userProfile.Id)
 	if err == nil {
 		return &model.CommandResponse{
 			Text: args.T("api.command_invite.user_already_in_channel.app_error", map[string]interface{}{
@@ -141,7 +140,9 @@ func (me *InviteProvider) DoCommand(a *app.App, args *model.CommandArgs, message
 		}
 	}
 
-	if _, err := a.AddChannelMember(userProfile.Id, channelToJoin, args.UserId, ""); err != nil {
+	if _, err := a.AddChannelMember(userProfile.Id, channelToJoin, app.ChannelMemberOpts{
+		UserRequestorID: args.UserId,
+	}); err != nil {
 		var text string
 		if err.Id == "api.channel.add_members.user_denied" {
 			text = args.T("api.command_invite.group_constrained_user_denied")
